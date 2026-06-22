@@ -267,13 +267,26 @@ def _working(flag: bool) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 TARGET_SUBREDDITS = [
-    "Nigeria", "lagos", "Nigerians", "NigeriansAbroad",
-    "AfricanDiaspora", "pakistan", "Pakistani", "PakistaniDiaspora",
-    "PersonalFinanceCanada", "PersonalFinanceUK", "personalfinance",
-    "entrepreneur", "smallbusiness", "digitalnomad", "africatech",
-    "UKPersonalFinance", "Remittance", "moneytransfer",
-    "CanadianInvestor", "ExpatFinance",
+    "NigeriaTravel",
+    "LagosTravel",
+    "NigerianTravelers",
+    "NigeriansAbroad",
+    "AfricanTravelers",
+    "PakistanTravel",
+    "PakistaniTravelers",
+    "PakistaniDiaspora",
+    "CanadaTravel",
+    "UKTravel",
+    "TravelHacks",
+    "Backpacking",
+    "DigitalNomad",
+    "AfricaTravel",
+    "UKTravelers",
+    "RemittanceTravel",
+    "ExpatTravel",
+    "TravelCommunity"
 ]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TARGET TELEGRAM GROUPS (unchanged from v7.3)
