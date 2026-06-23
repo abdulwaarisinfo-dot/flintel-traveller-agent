@@ -200,7 +200,7 @@ MONGODB_DB  = os.getenv("MONGODB_DB", "bookin_signals")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 HUBSPOT_API_KEY   = os.getenv("HUBSPOT_API_KEY")
 
-MIN_SCORE_MEDIUM = int(os.getenv("MIN_SCORE_MEDIUM", "6"))
+MIN_SCORE_MEDIUM = int(os.getenv("MIN_SCORE_MEDIUM", "4"))
 MIN_SCORE_HIGH   = int(os.getenv("MIN_SCORE_HIGH",   "8"))
 CLIENT_ID        = os.getenv("CLIENT_ID", "bookin")
 
@@ -267,24 +267,41 @@ def _working(flag: bool) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 TARGET_SUBREDDITS = [
-    "NigeriaTravel",
-    "LagosTravel",
-    "NigerianTravelers",
-    "NigeriansAbroad",
-    "AfricanTravelers",
+    "pakistan",
     "PakistanTravel",
+    "karachi",
+    "lahore",
+    "islamabad",
+    "hiking",
+    "travel",
     "PakistaniTravelers",
     "PakistaniDiaspora",
-    "CanadaTravel",
-    "UKTravel",
+    "expats",
+    "ImmigrationCanada",
+    "ukvisa",
+    "dubai",
+    "saudiarabia",
+    "solotravel",
+    "backpacking",
+    "shoestring",
     "TravelHacks",
-    "Backpacking",
-    "DigitalNomad",
-    "AfricaTravel",
-    "UKTravelers",
-    "RemittanceTravel",
-    "ExpatTravel",
-    "TravelCommunity"
+    "VisaJourney",
+    "schengen",
+    "JapanTravel",
+    "Turkey",
+    "malaysia",
+    "longtermtravel",
+    "digitalnomad",
+    "remotework",
+    "forhire",
+    "Upwork",
+    "freelance",
+    "EarthPorn",
+    "travelphotos",
+    "itinerary",
+    "Outdoors",
+    "Mountaineering",
+    "Roadtrip"
 ]
 
 
@@ -530,9 +547,9 @@ TWITTER_SEARCH_QUERY = _build_twitter_search_query()
 def _derive_fields(score: int) -> dict:
     if score >= 8:
         return {"signal_category": "high_intent", "tier": "immediate", "hubspot_priority": "high"}
-    elif score >= 6:
-        return {"signal_category": "mid_intent", "tier": "digest", "hubspot_priority": "medium"}
     elif score >= 4:
+        return {"signal_category": "mid_intent", "tier": "digest", "hubspot_priority": "medium"}
+    elif score >= 3:
         return {"signal_category": "mid_intent", "tier": "watchlist", "hubspot_priority": "low"}
     else:
         return {"signal_category": "discard", "tier": "discard", "hubspot_priority": "skip"}
@@ -1061,7 +1078,7 @@ def _build_batch_prompt(batch: list) -> str:
         text      = item.get("text", "")[:800]
 
         if subreddit:
-            location = f"r/{subreddit}"
+            location = f"{subreddit}"
         elif group:
             location = f"tg/{group}"
         else:
@@ -1205,7 +1222,7 @@ def _call_claude_batch(batch: list) -> list:
     results, was_truncated = _parse_claude_json(raw)
 
     if was_truncated:
-        recovered_indices = {int(r["index"]) for r in results if isinstance(r, dict) and "index" in r}
+        recovered_indices = {int("index"]) for in results if isinstance( dict) and "index" in 
         all_indices = set(range(1, len(batch) + 1))
         missing_indices = sorted(all_indices - recovered_indices)
 
@@ -1250,21 +1267,21 @@ def _call_claude_batch(batch: list) -> list:
         "watchlist":                    False,
     }
 
-    for r in results:
-        missing = required - r.keys()
+    for in results:
+        missing = required - keys()
         if missing:
             raise ValueError(f"Missing keys in Claude response: {missing}")
         for k, v in optional_defaults.items():
-            r.setdefault(k, v)
-        if r.get("intent_score", 1) < 1:
-            r["intent_score"] = 1
+            setdefault(k, v)
+        if get("intent_score", 1) < 1:
+            "intent_score"] = 1
 
-        score   = r["intent_score"]
+        score   = "intent_score"]
         derived = _derive_fields(score)
-        r["signal_category"]  = derived["signal_category"]
-        r["tier"]             = derived["tier"]
-        r["hubspot_priority"] = derived["hubspot_priority"]
-        r["watchlist_reason"] = r.get("reason") if r.get("watchlist") else None
+        "signal_category"]  = derived["signal_category"]
+        "tier"]             = derived["tier"]
+        "hubspot_priority"] = derived["hubspot_priority"]
+        "watchlist_reason"] = get("reason") if get("watchlist") else None
 
     return results
 
@@ -1336,7 +1353,7 @@ def save_signal(data: dict) -> bool:
         ctype    = data.get("content_type", "")
         sub      = data.get("subreddit", "")
         grp      = data.get("telegram_group", "")
-        source   = f"r/{sub}" if sub else (f"tg/{grp}" if grp else platform)
+        source   = f"{sub}" if sub else (f"tg/{grp}" if grp else platform)
 
         log.info(
             f"SAVED [{platform}] | Score:{score} | Tier:{data.get('tier','?')} | "
@@ -1466,11 +1483,10 @@ def _safe(text: str, limit: int = 2900) -> str:
 
 
 def _post_to_slack(payload: dict):
-    r = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
-    if r.status_code != 200:
-        raise Exception(f"Slack {r.status_code}: {r.text}")
-    return r
-
+    = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
+    if status_code != 200:
+        raise Exception(f"Slack {status_code}: {text}")
+    return 
 
 def send_slack_alert(data: dict) -> bool:
     if not SLACK_WEBHOOK_URL:
@@ -1517,7 +1533,7 @@ def send_slack_alert(data: dict) -> bool:
     header_text  = f"{header_emoji} {category} — Score {score}/10 | {tier}{rescore_tag}"
 
     if subreddit:
-        source_label = f"r/{subreddit}"
+        source_label = f"{subreddit}"
     elif tg_group:
         source_label = f"tg/{tg_group}"
     else:
@@ -1614,13 +1630,13 @@ def _hs_headers() -> dict:
 
 def _hs_find_contact(username: str) -> str | None:
     try:
-        r = requests.post(
+        = requests.post(
             f"{HUBSPOT_BASE}/crm/v3/objects/contacts/search",
             json={"filterGroups": [{"filters": [{"propertyName": "firstname", "operator": "EQ", "value": username}]}]},
             headers=_hs_headers(), timeout=10,
         )
-        r.raise_for_status()
-        results = r.json().get("results", [])
+        raise_for_status()
+        results = json().get("results", [])
         return results[0]["id"] if results else None
     except Exception as exc:
         log.error(f"HubSpot find contact error: {exc}")
@@ -1630,7 +1646,7 @@ def _hs_find_contact(username: str) -> str | None:
 def _hs_create_contact(data: dict) -> str | None:
     try:
         sub = data.get("subreddit", "") or data.get("telegram_group", "") or data.get("platform", "")
-        r = requests.post(
+        = requests.post(
             f"{HUBSPOT_BASE}/crm/v3/objects/contacts",
             json={"properties": {
                 "firstname":           f"{data.get('username','unknown')}",
@@ -1648,8 +1664,8 @@ def _hs_create_contact(data: dict) -> str | None:
             }},
             headers=_hs_headers(), timeout=10,
         )
-        r.raise_for_status()
-        return r.json().get("id")
+        raise_for_status()
+        return json().get("id")
     except Exception as exc:
         log.error(f"HubSpot create contact error: {exc}")
         return None
@@ -1685,7 +1701,7 @@ def _hs_create_note(data: dict, contact_id: str):
             f"LinkedIn:\n{data.get('linkedin_message') or 'N/A'}\n\n"
             f"Telegram DM:\n{data.get('telegram_dm') or 'N/A'}"
         )
-        r = requests.post(
+        = requests.post(
             f"{HUBSPOT_BASE}/crm/v3/objects/notes",
             json={
                 "properties": {
@@ -1699,7 +1715,7 @@ def _hs_create_note(data: dict, contact_id: str):
             },
             headers=_hs_headers(), timeout=10,
         )
-        r.raise_for_status()
+        raise_for_status()
     except Exception as exc:
         log.error(f"HubSpot create note error: {exc}")
 
@@ -2071,12 +2087,12 @@ def _reddit_rss_is_seen(entry_id: str) -> bool:
 
 
 def _get_reddit_rss(subreddit: str) -> list:
-    url   = f"https://www.reddit.com/r/{subreddit}/new.rss"
+    url   = f"https://www.reddit.com/{subreddit}/new.rss"
     items = []
     try:
         feed = feedparser.parse(url)
         if feed.bozo and not feed.entries:
-            log.warning(f"[REDDIT-RSS] Feed parse issue for r/{subreddit}: {feed.bozo_exception}")
+            log.warning(f"[REDDIT-RSS] Feed parse issue for {subreddit}: {feed.bozo_exception}")
             return items
 
         for entry in feed.entries:
@@ -2086,7 +2102,7 @@ def _get_reddit_rss(subreddit: str) -> list:
 
             title         = entry.get("title", "").strip()
             summary       = entry.get("summary", "").strip()
-            summary_plain = re.sub(r"<[^>]+>", " ", html.unescape(summary)).strip()
+            summary_plain = re.sub(<[^>]+>", " ", html.unescape(summary)).strip()
             text          = title
             if summary_plain and summary_plain.lower() != title.lower():
                 text = f"{title}\n\n{summary_plain}"
@@ -2106,7 +2122,7 @@ def _get_reddit_rss(subreddit: str) -> list:
             })
 
     except Exception as exc:
-        log.error(f"[REDDIT-RSS] Error fetching r/{subreddit}: {exc}")
+        log.error(f"[REDDIT-RSS] Error fetching {subreddit}: {exc}")
 
     return items
 
@@ -2131,12 +2147,12 @@ def poll_reddit_rss():
                     total_new += 1
                 if items:
                     log.info(
-                        f"[REDDIT-RSS] r/{subreddit} → {len(items)} new items queued "
+                        f"[REDDIT-RSS] {subreddit} → {len(items)} new items queued "
                         f"(queue size: {reddit_queue.qsize()})"
                     )
                 time.sleep(2)
             except Exception as exc:
-                log.error(f"[REDDIT-RSS] Unhandled error for r/{subreddit}: {exc}")
+                log.error(f"[REDDIT-RSS] Unhandled error for {subreddit}: {exc}")
                 total_errors += 1
 
         save_seen_ids("reddit", _reddit_seen_ids)
@@ -2446,7 +2462,7 @@ def send_daily_digest():
             platform = s.get("platform", "?").upper()
             sub      = s.get("subreddit", "")
             grp      = s.get("telegram_group", "")
-            source   = f"r/{sub}" if sub else (f"tg/{grp}" if grp else platform)
+            source   = f"{sub}" if sub else (f"tg/{grp}" if grp else platform)
             lines.append(
                 f"• *{s.get('username','?')}* | Score:{s['intent_score']}/10 | {platform} | {source}\n"
                 f"  Corridor: {corridor} | Pain: {pain}\n"
