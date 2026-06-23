@@ -287,7 +287,6 @@ TARGET_SUBREDDITS = [
     "TravelCommunity"
 ]
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # TARGET TELEGRAM GROUPS (unchanged from v7.3)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -530,9 +529,9 @@ TWITTER_SEARCH_QUERY = _build_twitter_search_query()
 def _derive_fields(score: int) -> dict:
     if score >= 8:
         return {"signal_category": "high_intent", "tier": "immediate", "hubspot_priority": "high"}
-    elif score >= 6:
-        return {"signal_category": "mid_intent", "tier": "digest", "hubspot_priority": "medium"}
     elif score >= 4:
+        return {"signal_category": "mid_intent", "tier": "digest", "hubspot_priority": "medium"}
+    elif score >= 3:
         return {"signal_category": "mid_intent", "tier": "watchlist", "hubspot_priority": "low"}
     else:
         return {"signal_category": "discard", "tier": "discard", "hubspot_priority": "skip"}
