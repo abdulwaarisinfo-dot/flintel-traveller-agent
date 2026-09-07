@@ -114,7 +114,6 @@ keyword = [
       "3PL",
       "A/B testing tool",
       "BigCommerce",
-      "POS",
       "SMS marketing",
       "Shopify",
       "UGC platform",
