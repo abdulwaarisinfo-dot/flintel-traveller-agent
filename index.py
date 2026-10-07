@@ -101,7 +101,9 @@ WHAT THIS SERVICE DELIBERATELY DOES NOT DO (unchanged):
   matches as time passes, which a single on-demand fetch never could.
 
 Requires `feedparser` (pip install feedparser) for RSS parsing, and
-`openai` (pip install openai) for embedding generation.
+`openai` (pip install openai) for embedding generation, and `PyMySQL`
+(pip install PyMySQL) for the optional MySQL sink (`numpy` is optional —
+used only to speed up embedding BLOB packing if installed).
 
 ──────────────────────────────────────────────────────────────────────────
 EMBEDDINGS — WHAT WAS ADDED IN THIS VERSION (and nothing else):
@@ -121,7 +123,7 @@ EMBEDDINGS — WHAT WAS ADDED IN THIS VERSION (and nothing else):
     as before — `embedding` is simply set to `None` on that document
     rather than blocking the save.
   - `backfill_missing_embeddings()` is a one-time, on-demand helper (run
-    manually via `python flintel.py --backfill-embeddings`) that scans
+    manually via `python index.py --backfill-embeddings`) that scans
     EXISTING documents in `flintel_signals` that already have a `text`
     field but no `embedding` (or `embedding: None`), and generates an
     embedding for each straight from that already-stored `text` — it
@@ -129,6 +131,46 @@ EMBEDDINGS — WHAT WAS ADDED IN THIS VERSION (and nothing else):
     automatically on every startup; it only runs when explicitly invoked.
   - Nothing else — no query embeddings, no vector index creation, no
     vector search, no ranking/retrieval changes.
+──────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────
+MYSQL SINK — ADDITIVE SAVE DESTINATION (alongside the existing MongoDB save):
+  - Two LIVE on/off switches (re-read from .env on every save, no restart
+    needed), same pattern as REDDIT_ENABLED:
+        MONGODB_DATA  (default TRUE)  -> save signals into MongoDB
+        MYSQL_DATA    (default FALSE) -> save signals into MySQL
+    With the defaults, behaviour is IDENTICAL to before (MongoDB only).
+    If BOTH are false nothing is saved; a warning is logged (throttled to
+    once per 60s inside _save_signal, and forced once per Reddit poller
+    cycle) and the service keeps running — it never crashes.
+  - MySQL is CLIENT-ONLY via PyMySQL: this process only connects to a
+    MySQL server that runs elsewhere (MYSQL_HOST/PORT/USER/PASSWORD/
+    DATABASE, optional SSL). No SQLite, no local DB files. The password
+    is never logged.
+  - Table `flintel_signals` (InnoDB, utf8mb4) is created with
+    CREATE TABLE IF NOT EXISTS only (never DROP/ALTER) — at startup via
+    init_mysql() and lazily on the first save if it's missing (guarded by
+    a lock + a once-per-process flag). The unique key is message_id ONLY,
+    exactly like MongoDB, so both sinks dedupe identically.
+  - Embedding format in MySQL: a BLOB holding the vector as flat float32
+    LITTLE-ENDIAN bytes (EMBEDDING_EXPECTED_DIM*4 bytes, 6144 for 1536
+    dims), plus `embedding_dim` and `embedding_model` columns. The MongoDB
+    embedding format (plain list of floats) is unchanged. If the BLOB
+    conversion fails, the MySQL row is still saved with NULL embedding
+    columns and a warning is logged.
+  - Connections: ONE PyMySQL connection PER THREAD (threading.local),
+    utf8mb4, autocommit, with connect/read/write timeouts. Every use is
+    preceded by ping(reconnect=True); on OperationalError / InterfaceError
+    / OSError the thread's connection is reset and the operation retried
+    ONCE before the error is raised.
+  - Duplicate-embedding bug fix: _save_signal now does a CHEAP existence
+    check in every enabled sink FIRST, and only if at least one enabled
+    sink is missing the post does it obtain ONE embedding (reusing
+    MongoDB's existing embedding if it has one, otherwise generating it),
+    shared across both sinks. A post already stored everywhere triggers
+    ZERO embedding calls.
+  - Each sink inserts in its own try/except, so one sink failing never
+    blocks or crashes the other.
 ──────────────────────────────────────────────────────────────────────────
 """
 
@@ -147,6 +189,19 @@ from dotenv import load_dotenv
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
 
+import array
+
+try:
+    import pymysql
+    import pymysql.err
+except ImportError:
+    pymysql = None
+
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ★ STATIC KEYWORDS — EMPTY ON PURPOSE. Fill this in yourself. Both the
 #   Reddit poller and the Twitter poller read directly from this list,
@@ -157,7 +212,7 @@ from pymongo.errors import DuplicateKeyError
 
 keyword = [
     
-    "3PL",
+          "3PL",
       "A/B testing tool",
       "BigCommerce",
       "SMS marketing",
@@ -10172,6 +10227,37 @@ EMBEDDING_BACKFILL_BATCH_SIZE = int(os.getenv("EMBEDDING_BACKFILL_BATCH_SIZE", "
 # a large historical backlog doesn't hammer the embedding API all at once.
 EMBEDDING_BACKFILL_GAP_SECONDS = float(os.getenv("EMBEDDING_BACKFILL_GAP_SECONDS", "0.2"))
 
+# ── SAVE-SINK SWITCHES + MYSQL CONFIG — additive. MongoDB stays the
+# default sink; MySQL is an optional second sink. Both switches are
+# checked LIVE (same pattern as _is_reddit_enabled) so they can be flipped
+# in .env without a restart. ──
+def _is_mongodb_data_enabled() -> bool:
+    load_dotenv(override=True)
+    return _env_bool("MONGODB_DATA", True)    # default TRUE
+
+
+def _is_mysql_data_enabled() -> bool:
+    load_dotenv(override=True)
+    return _env_bool("MYSQL_DATA", False)     # default FALSE
+
+
+# MySQL connection settings — read once at startup. The password is NEVER
+# logged anywhere.
+MYSQL_HOST            = os.getenv("MYSQL_HOST", "")
+MYSQL_PORT            = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USER            = os.getenv("MYSQL_USER", "")
+MYSQL_PASSWORD        = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DATABASE        = os.getenv("MYSQL_DATABASE", "")
+MYSQL_SSL             = _env_bool("MYSQL_SSL", False)
+MYSQL_SSL_CA          = os.getenv("MYSQL_SSL_CA", "")
+MYSQL_CONNECT_TIMEOUT = int(os.getenv("MYSQL_CONNECT_TIMEOUT", "10"))
+MYSQL_READ_TIMEOUT    = int(os.getenv("MYSQL_READ_TIMEOUT", "30"))
+MYSQL_WRITE_TIMEOUT   = int(os.getenv("MYSQL_WRITE_TIMEOUT", "30"))
+
+# Expected embedding dimensionality (text-embedding-3-small = 1536). Used to
+# validate the MySQL BLOB length (dim * 4 bytes of float32).
+EMBEDDING_EXPECTED_DIM = int(os.getenv("EMBEDDING_EXPECTED_DIM", "1536"))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10496,7 +10582,7 @@ def backfill_missing_embeddings():
     BEFORE this embedding layer existed (or that were saved while
     EMBEDDING_ENABLED was False):
 
-        python flintel.py --backfill-embeddings
+        python index.py --backfill-embeddings
 
     What it does, and nothing more:
       1. Finds documents in flintel_signals that already have a `text`
@@ -10571,6 +10657,356 @@ def backfill_missing_embeddings():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MYSQL SINK — NEW, ADDITIVE. Client-only (PyMySQL), one connection per
+# thread, table created with CREATE TABLE IF NOT EXISTS only. Nothing here
+# runs unless MYSQL_DATA is true (init_mysql() is a no-op otherwise, and
+# _save_signal only touches MySQL when the live switch is on).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MYSQL_CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS flintel_signals (
+    id              BIGINT        NOT NULL AUTO_INCREMENT,
+    message_id      VARCHAR(191)  NOT NULL,
+    topic_key       VARCHAR(255)  NOT NULL,
+    search_keyword  VARCHAR(255)  NULL,
+    platform        VARCHAR(32)   NOT NULL,
+    subreddit       VARCHAR(128)  NULL,
+    username        VARCHAR(255)  NULL,
+    title           MEDIUMTEXT    NULL,
+    `text`          MEDIUMTEXT    NULL,
+    post_url        VARCHAR(1024) NULL,
+    score           INT           DEFAULT 0,
+    num_comments    INT           DEFAULT 0,
+    created_utc     DATETIME(3)   NOT NULL,
+    fetched_at      DATETIME(3)   NOT NULL,
+    embedding       BLOB          NULL,
+    embedding_dim   SMALLINT      NULL,
+    embedding_model VARCHAR(64)   NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_signals_message_id (message_id),
+    KEY idx_signals_topic_key (topic_key),
+    KEY idx_signals_search_keyword (search_keyword),
+    KEY idx_signals_created_utc (created_utc),
+    KEY idx_signals_fetched_at (fetched_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+_MYSQL_INSERT_SQL = (
+    "INSERT INTO flintel_signals "
+    "(message_id, topic_key, search_keyword, platform, subreddit, username, "
+    "title, `text`, post_url, score, num_comments, created_utc, fetched_at, "
+    "embedding, embedding_dim, embedding_model) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+)
+
+# One PyMySQL connection PER THREAD.
+_mysql_local = threading.local()
+
+# Guards the once-per-process "make sure the table exists" step.
+_mysql_table_lock = threading.Lock()
+_mysql_table_ready = False
+
+# Errors that mean "the connection is bad — reset it and retry once".
+if pymysql is not None:
+    _MYSQL_RETRY_ERRORS = (pymysql.err.OperationalError, pymysql.err.InterfaceError, OSError)
+else:
+    _MYSQL_RETRY_ERRORS = (OSError,)
+
+# Throttle state for the "both sinks disabled" warning.
+_no_sinks_lock = threading.Lock()
+_no_sinks_last_warn = 0.0
+
+
+def _warn_no_sinks(force: bool = False):
+    """Logs the "both sinks disabled" warning. Throttled to at most once per
+    60s unless force=True (used once per Reddit poller cycle). Never raises."""
+    global _no_sinks_last_warn
+    try:
+        now = time.time()
+        with _no_sinks_lock:
+            if not force and (now - _no_sinks_last_warn) < 60:
+                return
+            _no_sinks_last_warn = now
+        log.warning("MONGODB_DATA aur MYSQL_DATA dono false: kuch save nahi ho raha")
+    except Exception:
+        pass
+
+
+def _mysql_connect():
+    """Opens a fresh PyMySQL connection using the MYSQL_* config. The
+    password is never logged."""
+    if pymysql is None:
+        raise RuntimeError("PyMySQL is not installed (pip install PyMySQL)")
+
+    kwargs = dict(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        charset="utf8mb4",
+        autocommit=True,
+        connect_timeout=MYSQL_CONNECT_TIMEOUT,
+        read_timeout=MYSQL_READ_TIMEOUT,
+        write_timeout=MYSQL_WRITE_TIMEOUT,
+    )
+    if MYSQL_SSL:
+        if MYSQL_SSL_CA:
+            kwargs["ssl"] = {"ca": MYSQL_SSL_CA}
+        else:
+            kwargs["ssl"] = {"check_hostname": False}
+
+    return pymysql.connect(**kwargs)
+
+
+def _reset_mysql_conn():
+    """Drops (and quietly closes) this thread's connection so the next use
+    reconnects from scratch."""
+    conn = getattr(_mysql_local, "conn", None)
+    _mysql_local.conn = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _get_mysql_conn():
+    """Returns this thread's connection (creating it if needed), pinged with
+    reconnect=True before every use."""
+    conn = getattr(_mysql_local, "conn", None)
+    if conn is None:
+        conn = _mysql_connect()
+        _mysql_local.conn = conn
+    else:
+        conn.ping(reconnect=True)
+    return conn
+
+
+def _with_mysql(fn):
+    """Runs fn(conn). On OperationalError / InterfaceError / OSError resets
+    this thread's connection and retries ONCE; if the retry fails too, the
+    error is raised."""
+    last_exc = None
+    for attempt in (1, 2):
+        try:
+            conn = _get_mysql_conn()
+            return fn(conn)
+        except _MYSQL_RETRY_ERRORS as exc:
+            last_exc = exc
+            _reset_mysql_conn()
+            if attempt == 1:
+                log.warning(f"[MYSQL] connection problem, retrying once | {exc}")
+    raise last_exc
+
+
+def _ensure_mysql_table(conn):
+    """CREATE TABLE IF NOT EXISTS (never DROP/ALTER), once per process,
+    guarded by a lock + the _mysql_table_ready flag."""
+    global _mysql_table_ready
+    if _mysql_table_ready:
+        return
+    with _mysql_table_lock:
+        if _mysql_table_ready:
+            return
+        with conn.cursor() as cur:
+            cur.execute(_MYSQL_CREATE_TABLE_SQL)
+        _mysql_table_ready = True
+        log.info("[MYSQL] table flintel_signals ready")
+
+
+def init_mysql():
+    """Startup helper: if MYSQL_DATA is enabled, connects and ensures the
+    table exists. NEVER raises — on any problem it warns and carries on
+    (the next save will try to reconnect). No-op unless MYSQL_DATA is true."""
+    if not _is_mysql_data_enabled():
+        return
+    try:
+        _with_mysql(_ensure_mysql_table)
+        log.info(f"[MYSQL] connected | host={MYSQL_HOST} db={MYSQL_DATABASE}")
+    except Exception as exc:
+        log.warning(f"[MYSQL] init failed (will retry on next save) | {exc}")
+
+
+# ── Embedding BLOB helpers ──
+
+def _embedding_to_blob(vec):
+    """list[float] -> float32 LITTLE-ENDIAN flat bytes. Returns None for
+    None/empty. Raises ValueError if the byte length isn't
+    EMBEDDING_EXPECTED_DIM * 4."""
+    if vec is None or len(vec) == 0:
+        return None
+
+    if _np is not None:
+        blob = _np.asarray(vec, dtype="<f4").tobytes()
+    else:
+        arr = array.array("f", vec)
+        if sys.byteorder == "big":
+            arr.byteswap()
+        blob = arr.tobytes()
+
+    expected = EMBEDDING_EXPECTED_DIM * 4
+    if len(blob) != expected:
+        raise ValueError(
+            f"embedding blob length {len(blob)} bytes != expected {expected} "
+            f"(EMBEDDING_EXPECTED_DIM={EMBEDDING_EXPECTED_DIM})"
+        )
+    return blob
+
+
+def _blob_to_embedding(blob):
+    """Inverse of _embedding_to_blob. None for None/empty; ValueError on
+    wrong length."""
+    if blob is None or len(blob) == 0:
+        return None
+
+    expected = EMBEDDING_EXPECTED_DIM * 4
+    if len(blob) != expected:
+        raise ValueError(
+            f"embedding blob length {len(blob)} bytes != expected {expected} "
+            f"(EMBEDDING_EXPECTED_DIM={EMBEDDING_EXPECTED_DIM})"
+        )
+
+    if _np is not None:
+        return _np.frombuffer(bytes(blob), dtype="<f4").astype(float).tolist()
+
+    arr = array.array("f")
+    arr.frombytes(bytes(blob))
+    if sys.byteorder == "big":
+        arr.byteswap()
+    return arr.tolist()
+
+
+# ── Row building helpers ──
+
+def _clip(value, max_len: int):
+    """Clips a value to a VARCHAR column's width (strict-mode safe). None
+    stays None."""
+    if value is None:
+        return None
+    return str(value)[:max_len]
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _to_utc_naive(dt):
+    """tz-aware datetime -> UTC-naive datetime for DATETIME(3)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _build_mysql_row(doc: dict) -> tuple:
+    """Builds the parameter tuple for _MYSQL_INSERT_SQL from a signal doc.
+    If the embedding can't be converted to a BLOB, the row is still built
+    with NULL embedding/embedding_dim/embedding_model and a warning is
+    logged."""
+    embedding = doc.get("embedding")
+    blob = None
+    emb_dim = None
+    emb_model = None
+    try:
+        blob = _embedding_to_blob(embedding)
+        if blob is not None:
+            emb_dim = len(embedding)
+            emb_model = EMBEDDING_MODEL[:64]
+    except Exception as exc:
+        log.warning(
+            f"[MYSQL] embedding blob conversion failed, saving row with NULL embedding | "
+            f"message_id={doc.get('message_id')} | {exc}"
+        )
+        blob = None
+        emb_dim = None
+        emb_model = None
+
+    return (
+        _clip(doc["message_id"], 191),
+        _clip(doc["topic_key"], 255),
+        _clip(doc.get("search_keyword"), 255),
+        _clip(doc["platform"], 32),
+        _clip(doc.get("subreddit"), 128),
+        _clip(doc.get("username"), 255),
+        doc.get("title"),
+        doc.get("text"),
+        _clip(doc.get("post_url"), 1024),
+        _safe_int(doc.get("score")),
+        _safe_int(doc.get("num_comments")),
+        _to_utc_naive(doc["created_utc"]),
+        _to_utc_naive(doc["fetched_at"]),
+        blob,
+        emb_dim,
+        emb_model,
+    )
+
+
+def _mysql_post_exists(mid: str) -> bool:
+    """Cheap existence check in MySQL. On ANY MySQL failure returns False
+    (the insert that follows will log the real error)."""
+    try:
+        def _q(conn):
+            _ensure_mysql_table(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM flintel_signals WHERE message_id=%s LIMIT 1",
+                    (mid,),
+                )
+                return cur.fetchone() is not None
+        return bool(_with_mysql(_q))
+    except Exception:
+        return False
+
+
+def _save_to_mongo(doc: dict) -> bool:
+    """Inserts the doc into MongoDB. Returns True only if a NEW document was
+    inserted. Never raises."""
+    try:
+        db.flintel_signals.insert_one(doc)
+        return True
+    except DuplicateKeyError:
+        # Race: someone inserted it between our existence check and now.
+        return False
+    except Exception as exc:
+        log.error(f"[MONGO] save_signal error | message_id={doc['message_id']} | {exc}")
+        return False
+
+
+def _save_to_mysql(doc: dict) -> bool:
+    """Inserts the doc into MySQL (parameterized). Returns True only if a
+    NEW row was inserted. Never raises."""
+    try:
+        if pymysql is None:
+            raise RuntimeError("PyMySQL is not installed (pip install PyMySQL)")
+
+        row = _build_mysql_row(doc)
+
+        def _ins(conn):
+            _ensure_mysql_table(conn)
+            with conn.cursor() as cur:
+                cur.execute(_MYSQL_INSERT_SQL, row)
+            return True
+
+        return bool(_with_mysql(_ins))
+    except Exception as exc:
+        if (
+            pymysql is not None
+            and isinstance(exc, pymysql.err.IntegrityError)
+            and exc.args
+            and exc.args[0] == 1062
+        ):
+            # Race: duplicate message_id — not an error.
+            return False
+        log.error(f"[MYSQL] save_signal error | message_id={doc.get('message_id')} | {exc}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SAVE FETCHED MESSAGES — same collection, same document shape as before,
 # plus (new) one embedding generated from this document's own text.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10611,25 +11047,67 @@ def _save_signal(topic_key: str, matched_keyword: str, platform: str, post: dict
         "fetched_at":       datetime.now(timezone.utc),
     }
 
-    # ── NEW: one embedding, generated from THIS document's own `text`
-    # only, stored on this same document. Generated once, right here,
-    # right before the first (and only, thanks to the unique index below)
-    # insert of this document — never regenerated afterwards. If
-    # embeddings are disabled or generation fails, this is simply None
-    # and the save proceeds exactly as it always did. ──
-    doc["embedding"] = generate_embedding(text) if _is_embedding_enabled() else None
+    # 1. Live sink switches. If both are off, save nothing (throttled warning).
+    mongo_on = _is_mongodb_data_enabled()
+    mysql_on = _is_mysql_data_enabled()
+    if not mongo_on and not mysql_on:
+        _warn_no_sinks()
+        return False
 
-    try:
-        db.flintel_signals.insert_one(doc)
-        return True
-    except DuplicateKeyError:
-        # Already fetched this post before (possibly for a different
-        # keyword search that also matched it) — not an error, and no
-        # embedding call happens for it again.
+    mid = doc["message_id"]
+
+    # 2. Cheap existence check in each ENABLED sink — BEFORE any embedding
+    # work, so an already-saved post never costs an embedding call.
+    mongo_exists = False
+    mysql_exists = False
+    existing_embedding = None
+
+    if mongo_on:
+        try:
+            existing = db.flintel_signals.find_one(
+                {"message_id": mid}, {"_id": 1, "embedding": 1}
+            )
+            if existing:
+                mongo_exists = True
+                emb = existing.get("embedding")
+                if isinstance(emb, list) and len(emb) > 0:
+                    existing_embedding = emb
+        except Exception as exc:
+            log.error(f"[MONGO] save_signal error | message_id={mid} | existence check failed: {exc}")
+
+    if mysql_on:
+        try:
+            mysql_exists = _mysql_post_exists(mid)
+        except Exception as exc:
+            log.error(f"[MYSQL] save_signal error | message_id={mid} | existence check failed: {exc}")
+
+    # 3. Every enabled sink already has it -> done, ZERO embedding calls.
+    if (not mongo_on or mongo_exists) and (not mysql_on or mysql_exists):
         return False
-    except Exception as exc:
-        log.error(f"[MONGO] save_signal error | message_id={doc['message_id']} | {exc}")
-        return False
+
+    # 4. At most ONE embedding, shared across both sinks: reuse Mongo's
+    # existing one if present, else generate (only if enabled), else None.
+    if existing_embedding is not None:
+        embedding = existing_embedding
+    elif _is_embedding_enabled():
+        embedding = generate_embedding(text)
+    else:
+        embedding = None
+    doc["embedding"] = embedding
+
+    # 5. Insert per sink, each isolated so one failing never blocks the other.
+    inserted_any = False
+
+    if mongo_on and not mongo_exists:
+        if _save_to_mongo(doc):
+            inserted_any = True
+
+    if mysql_on and not mysql_exists:
+        if _save_to_mysql(doc):
+            inserted_any = True
+
+    # 6. True if a NEW row was inserted in at least one enabled sink.
+    return inserted_any
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10655,6 +11133,10 @@ def run_reddit_poller():
                     log.info("[REDDIT-POLLER] REDDIT_ENABLED=False | fetching stopped this cycle")
                     time.sleep(REDDIT_POLL_INTERVAL_SECONDS)
                     continue
+
+                # Both save sinks disabled -> warn once per cycle, keep running.
+                if not _is_mongodb_data_enabled() and not _is_mysql_data_enabled():
+                    _warn_no_sinks(force=True)
 
                 keywords = _get_keywords()
                 if not keywords:
@@ -10811,6 +11293,8 @@ if __name__ == "__main__":
     log.info(f"  Reddit fetching   : {'ENABLED' if _is_reddit_enabled() else 'DISABLED (REDDIT_ENABLED=False — poller alive but not fetching)'} (checked live from .env every cycle, no restart needed to change)")
     log.info(f"  Twitter/X         : {'ENABLED' if _is_twitter_enabled() else 'DISABLED (set RAPID_API_KEY + TWITTER_ENABLED=True to enable)'} (checked live from .env every cycle, no restart needed to change)")
     log.info(f"  Embeddings        : {'ENABLED — model=' + EMBEDDING_MODEL if _is_embedding_enabled() else 'DISABLED (set OPENAI_API_KEY + EMBEDDING_ENABLED=True to enable)'} (checked live from .env, one embedding per newly saved document)")
+    log.info(f"  Mongo signals save : {'ENABLED' if _is_mongodb_data_enabled() else 'DISABLED'} (MONGODB_DATA)")
+    log.info(f"  MySQL signals save : {'ENABLED' if _is_mysql_data_enabled() else 'DISABLED'} (MYSQL_DATA) | host={MYSQL_HOST or '-'} db={MYSQL_DATABASE or '-'}")
     log.info(f"  Lookback window   : {LOOKBACK_DAYS} days (mostly no-op on a live RSS feed)")
     log.info("  Scoring           : NONE — raw messages only")
     log.info("  Slack / HubSpot   : REMOVED")
@@ -10820,4 +11304,5 @@ if __name__ == "__main__":
     log.info("  Embedding backfill: run with --backfill-embeddings for historical docs missing an embedding")
     log.info("=" * 70)
 
+    init_mysql()
     start_all()
