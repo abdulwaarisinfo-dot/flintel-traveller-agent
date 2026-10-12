@@ -205,6 +205,13 @@ try:
 except ImportError:
     _np = None
 
+try:
+    from hackernews import run_hackernews_loop
+    from hackernews import config as hn_config
+except Exception:  # pragma: no cover
+    run_hackernews_loop = None
+    hn_config = None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ★ STATIC KEYWORDS — EMPTY ON PURPOSE. Fill this in yourself. Both the
 #   Reddit poller and the Twitter poller read directly from this list,
@@ -11349,6 +11356,18 @@ def start_all():
     twitter_thread.start()
     threads.append(twitter_thread)
 
+    if run_hackernews_loop is not None:
+        def _hn_sinks_ok():
+            return _is_mongodb_data_enabled() or _is_mysql_data_enabled()
+
+        hn_thread = threading.Thread(
+            target=run_hackernews_loop,
+            args=(_save_signal, _get_keywords, _set_service_status, _hn_sinks_ok, db),
+            daemon=True, name="HackerNewsPoller",
+        )
+        hn_thread.start()
+        threads.append(hn_thread)
+
     for t in threads:
         t.join()
 
@@ -11375,6 +11394,7 @@ if __name__ == "__main__":
     log.info(f"  Twitter fetch mode: continuous poller, every {TWITTER_POLL_INTERVAL_SECONDS}s")
     log.info(f"  Reddit fetching   : {'ENABLED' if _is_reddit_enabled() else 'DISABLED (REDDIT_ENABLED=False — poller alive but not fetching)'} (checked live from .env every cycle, no restart needed to change)")
     log.info(f"  Twitter/X         : {'ENABLED' if _is_twitter_enabled() else 'DISABLED (set RAPID_API_KEY + TWITTER_ENABLED=True to enable)'} (checked live from .env every cycle, no restart needed to change)")
+    log.info(f"  Hacker News       : {'ENABLED' if (hn_config and hn_config.is_hackernews_enabled()) else 'DISABLED'} (HACKERNEWS_ENABLED, live-checked, always-on thread, keywords from the static list, rotating {hn_config.HN_KEYWORDS_PER_CYCLE if hn_config else '-'} per cycle, via Algolia API)")
     log.info(f"  Embeddings        : {'ENABLED — model=' + EMBEDDING_MODEL if _is_embedding_enabled() else 'DISABLED (set OPENAI_API_KEY + EMBEDDING_ENABLED=True to enable)'} (checked live from .env, one embedding per newly saved document)")
     log.info(f"  Mongo signals save : {'ENABLED' if _is_mongodb_data_enabled() else 'DISABLED'} (MONGODB_DATA)")
     log.info(f"  MySQL signals save : {'ENABLED' if _is_mysql_data_enabled() else 'DISABLED'} (MYSQL_DATA) | host={MYSQL_HOST or '-'} db={MYSQL_DATABASE or '-'}")
